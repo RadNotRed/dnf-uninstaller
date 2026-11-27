@@ -1,3 +1,5 @@
+import { node, svg } from "./dom";
+import { leftoverDetails } from "./leftovers";
 import { invoke, listen } from "./ipc";
 import type {
   Application,
@@ -7,13 +9,16 @@ import type {
   ResultReport,
   Scan,
   Theme,
+  UninstallHistory,
 } from "./ipc";
 
 type ButtonId =
+  | "all-leftovers"
   | "app-menu-button"
   | "back"
   | "cancel-scan"
   | "check-updates"
+  | "cleanup-delete"
   | "cleanup-review"
   | "confirm"
   | "install-update"
@@ -29,6 +34,7 @@ type ElementById = Record<ButtonId, HTMLButtonElement> & {
   about: HTMLDialogElement;
   "about-icon": HTMLImageElement;
   confirmation: HTMLDialogElement;
+  "leftover-offer": HTMLDialogElement;
   search: HTMLInputElement;
   sort: HTMLSelectElement;
   source: HTMLSelectElement;
@@ -77,6 +83,7 @@ const collator = new Intl.Collator(undefined, {
 type Snapshots = {
   installed?: Scan<Application>;
   leftovers?: Scan<Candidate>;
+  recent?: Scan<Candidate>;
   launchers?: Scan<Candidate>;
   recovery?: never;
   settings?: never;
@@ -95,34 +102,18 @@ const state = {
   limit: 60,
   snapshots: {} as Snapshots,
   recovery: null as Recovery[] | null,
+  uninstallHistory: null as UninstallHistory | null,
+  historyError: "",
+  historyLimit: 50,
   selection: new Set<string>(),
+  recentSelection: new Set<string>(),
+  recentApp: null as string | null,
   icons: new Map<string, string | null>(),
   updateRepo: false,
   checkingUpdate: false,
   updateVersion: null as string | null,
   restartRequired: false,
 };
-
-function node<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  value?: string | null,
-  className?: string,
-) {
-  const item = document.createElement(tag);
-  if (value !== undefined) item.textContent = value;
-  if (className) item.className = className;
-  return item;
-}
-
-function svg(name: string) {
-  const ns = "http://www.w3.org/2000/svg";
-  const icon = document.createElementNS(ns, "svg");
-  const use = document.createElementNS(ns, "use");
-  use.setAttribute("href", "#" + name);
-  icon.setAttribute("aria-hidden", "true");
-  icon.append(use);
-  return icon;
-}
 
 function updateIcons(key: string, data: string | null) {
   if (!data?.startsWith("data:image/png;base64,")) return;
@@ -257,7 +248,7 @@ function controls() {
   if (!scanning) $("cancel-scan").disabled = false;
   $("refresh").hidden = state.view === "settings";
   $("refresh").disabled = state.busy;
-  $("cleanup-review").disabled = state.busy || !state.selection.size;
+  cleanupControls();
   $("theme").disabled = state.busy;
   selectors.forEach((button) => {
     button.disabled = state.busy;
@@ -300,6 +291,41 @@ function cleanupView() {
   return state.view === "leftovers" || state.view === "launchers";
 }
 
+function snapshotKey<V extends View>(view: V): V | "recent" {
+  return view === "leftovers" && state.recentApp !== null ? "recent" : view;
+}
+
+function cleanupSelection() {
+  return snapshotKey(state.view) === "recent"
+    ? state.recentSelection
+    : state.selection;
+}
+
+function cleanupControls() {
+  const selected = cleanupSelection();
+  const recent = snapshotKey(state.view) === "recent";
+  const canReview = !state.busy && selected.size > 0;
+  $("cleanup-review").disabled = !canReview;
+  $("cleanup-delete").disabled = !canReview;
+  $("all-leftovers").disabled = state.busy;
+  $("all-leftovers").hidden = !recent;
+  $("cleanup-delete").hidden = !recent;
+  const summary = $("cleanup-selection");
+  summary.hidden = !recent || !selected.size;
+  if (summary.hidden) return;
+  const items =
+    state.snapshots.recent?.items.filter((item) => selected.has(item.path)) ??
+    [];
+  const total = items.reduce((sum, item) => sum + (item.bytes ?? 0), 0);
+  const unknown = items.some((item) => item.bytes === null);
+  const size =
+    unknown && !total
+      ? "Size unavailable"
+      : bytes(total) +
+        (unknown ? " estimated for items with known sizes" : " estimated");
+  summary.textContent = selected.size + " selected · " + size;
+}
+
 function selectView(view: View, keyboardFocus = false) {
   if (state.busy) return;
   state.view = view;
@@ -308,7 +334,13 @@ function selectView(view: View, keyboardFocus = false) {
       button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   });
-  $("title").textContent = titles[view];
+  const recent = snapshotKey(view) === "recent";
+  $("title").textContent = recent
+    ? "Leftovers for " + state.recentApp
+    : titles[view];
+  $("cleanup-review").textContent = recent
+    ? "Move to Recovery…"
+    : "Review selection";
   ["installed", "cleanup", "recovery", "settings"].forEach((section) => {
     $(section).hidden = section !== (cleanupView() ? "cleanup" : view);
   });
@@ -316,7 +348,9 @@ function selectView(view: View, keyboardFocus = false) {
   $("cleanup-context").textContent =
     view === "launchers"
       ? "Check desktop entries for missing programs and unavailable icons. Select stale entries to move to Recovery."
-      : "Review data and icons associated with removed applications. Check the reason and path before selecting an item.";
+      : recent
+        ? "Select the files you want to remove. Moving them to Recovery keeps them on disk."
+        : "Review data and icons associated with removed applications. Check the reason and path before selecting an item.";
   state.selection.clear();
   notice("");
   controls();
@@ -324,7 +358,7 @@ function selectView(view: View, keyboardFocus = false) {
   if (keyboardFocus) $("title").focus();
   if (
     (view === "installed" && !state.loaded) ||
-    (cleanupView() && !state.snapshots[view]) ||
+    (cleanupView() && !state.snapshots[snapshotKey(view)]) ||
     (view === "recovery" && state.recovery === null)
   )
     refreshView(false);
@@ -332,12 +366,12 @@ function selectView(view: View, keyboardFocus = false) {
 
 function renderView() {
   const view = state.view;
-  warnings(state.snapshots[view]?.warnings ?? []);
+  warnings(state.snapshots[snapshotKey(view)]?.warnings ?? []);
   if (state.view === "installed") {
     renderApps();
     renderDetails();
   } else if (view === "leftovers" || view === "launchers") {
-    const snapshot = state.snapshots[view];
+    const snapshot = state.snapshots[snapshotKey(view)];
     renderCleanup(snapshot?.items ?? [], Boolean(snapshot));
   } else if (state.view === "recovery") {
     renderRecovery();
@@ -353,18 +387,45 @@ async function fetchView(view: View, refresh: boolean) {
     state.loaded = true;
     if (!state.apps.some((app) => app.key === state.key)) closeDetails(false);
   } else if (view === "leftovers" || view === "launchers") {
+    const key = snapshotKey(view);
     const scanned = await invoke("scan_cleanup", {
       launchers: view === "launchers",
+      recent: key === "recent",
       refresh,
     });
     if (refresh) {
       state.snapshots = {};
       state.loaded = false;
     }
-    state.selection.clear();
-    state.snapshots[view] = scanned;
+    if (key === "recent") {
+      const available = new Set(
+        scanned.items
+          .filter((item) => item.selectable)
+          .map((item) => item.path),
+      );
+      for (const path of state.recentSelection) {
+        if (!available.has(path)) state.recentSelection.delete(path);
+      }
+    } else {
+      state.selection.clear();
+    }
+    state.snapshots[key] = scanned;
   } else if (view === "recovery") {
-    state.recovery = await invoke("recovery");
+    const [recovery, history] = await Promise.allSettled([
+      invoke("recovery"),
+      invoke("uninstall_history"),
+    ]);
+    state.uninstallHistory =
+      history.status === "fulfilled" ? history.value : null;
+    state.historyError =
+      history.status === "rejected"
+        ? "Could not load uninstall history. " + history.reason
+        : "";
+    if (recovery.status === "rejected") {
+      renderHistory();
+      throw recovery.reason;
+    }
+    state.recovery = recovery.value;
   }
   renderView();
 }
@@ -416,6 +477,7 @@ function reviewUninstall(app: Application) {
     "Uninstall",
     () => invoke("preview_uninstall", { key: app.key }),
     app.source !== "RPM" || state.rpmHelper,
+    app.name,
   );
 }
 
@@ -587,7 +649,30 @@ function bytes(value: number | null) {
   );
 }
 
+function leftoverFolderButton(item: Candidate) {
+  const button = node("button", undefined, "leftover-folder");
+  button.type = "button";
+  button.dataset.operation = "";
+  button.title = "Open in file manager";
+  button.setAttribute("aria-label", "Open in file manager: " + item.path);
+  button.append(svg("folder-icon"));
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await invoke("open_leftover", { path: item.path });
+      notice("");
+    } catch (error) {
+      notice(String(error), true);
+    } finally {
+      button.disabled = state.busy;
+    }
+  });
+  return button;
+}
+
 function renderCleanup(items: Candidate[], loaded: boolean) {
+  const recent = snapshotKey(state.view) === "recent";
+  const selected = cleanupSelection();
   $("cleanup-count").textContent = loaded
     ? items.length + (items.length === 1 ? " candidate" : " candidates")
     : "";
@@ -621,21 +706,25 @@ function renderCleanup(items: Candidate[], loaded: boolean) {
         checkbox.id = "candidate-" + index;
         checkbox.type = "checkbox";
         checkbox.dataset.operation = "";
-        checkbox.checked = state.selection.has(item.path);
+        checkbox.checked = selected.has(item.path);
         label.htmlFor = checkbox.id;
         path.id = "candidate-path-" + index;
         checkbox.setAttribute("aria-describedby", path.id);
         checkbox.addEventListener("change", () => {
-          if (checkbox.checked) state.selection.add(item.path);
-          else state.selection.delete(item.path);
-          controls();
+          if (checkbox.checked) selected.add(item.path);
+          else selected.delete(item.path);
+          cleanupControls();
         });
         row.append(checkbox);
       } else {
         row.append(svg(item.kind === "Launcher" ? "launcher-icon" : "files"));
       }
-      content.append(label, path, details, node("p", item.reason, "reason"));
+      content.append(label, path, details);
+      content.append(
+        recent ? leftoverDetails(item) : node("p", item.reason, "reason"),
+      );
       row.append(content);
+      if (recent && item.selectable) row.append(leftoverFolderButton(item));
       return row;
     }),
   );
@@ -681,6 +770,75 @@ function renderRecovery() {
       return row;
     }),
   );
+  renderHistory();
+}
+
+const historyDate = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
+function renderHistory() {
+  const history = state.uninstallHistory;
+  const entries = history?.entries ?? [];
+  const earlier = history?.earlier_ids ?? [];
+  const total = entries.length + earlier.length;
+  $("history-empty").hidden = history === null || total > 0;
+  $("history-error").textContent = state.historyError;
+  $("history-error").hidden = !state.historyError;
+  $("history-more").hidden = total <= state.historyLimit;
+  const rows = [];
+  for (const entry of entries.slice(0, state.historyLimit)) {
+    const row = node("li", undefined, "row");
+    const content = node("div", undefined, "row-content");
+    content.append(node("span", entry.name, "row-title"));
+    const details = [entry.source, entry.version, entry.app_id].filter(Boolean);
+    if (details.length)
+      content.append(node("p", details.join(" · "), "row-meta"));
+    row.append(content);
+    const date =
+      entry.removed_at === null ? null : new Date(entry.removed_at * 1000);
+    if (date && Number.isFinite(date.getTime())) {
+      const time = node(
+        "time",
+        historyDate.format(date),
+        "row-meta history-date",
+      );
+      time.dateTime = date.toISOString();
+      row.append(time);
+    }
+    rows.push(row);
+  }
+  for (const id of earlier.slice(
+    0,
+    Math.max(0, state.historyLimit - entries.length),
+  )) {
+    const row = node("li", undefined, "row");
+    const content = node("div", undefined, "row-content");
+    content.append(
+      node("span", id, "row-title"),
+      node("p", "Earlier uninstall · Date unavailable", "row-meta"),
+    );
+    row.append(content);
+    rows.push(row);
+  }
+  $("history-rows").replaceChildren(...rows);
+}
+
+function offerLeftoverScan(app: string) {
+  const dialog = $("leftover-offer");
+  $("leftover-offer-title").textContent = app + " was uninstalled";
+  dialog.returnValue = "";
+  dialog.showModal();
+  dialog.addEventListener(
+    "close",
+    () => {
+      if (dialog.returnValue !== "scan") return;
+      state.recentApp = app;
+      selectView("leftovers", true);
+    },
+    { once: true },
+  );
 }
 
 async function review(
@@ -688,12 +846,14 @@ async function review(
   title: string,
   action:
     | "Delete permanently"
+    | "Delete leftovers permanently"
     | "Uninstall"
     | "Remove launcher"
     | "Install update"
     | "Move to Recovery",
   request: () => Promise<Confirmation>,
   canRun = true,
+  uninstalledApp?: string,
 ) {
   const result = await work(label, request);
   if (!result) return;
@@ -705,7 +865,9 @@ async function review(
   );
   $("confirmation-authorization").hidden = !result.authorization;
   $("confirmation-authorization").textContent = result.authorization ?? "";
-  $("confirm").textContent = action;
+  $("confirm").textContent =
+    action === "Delete leftovers permanently" ? "Delete permanently" : action;
+  $("confirm").classList.toggle("destructive", action !== "Move to Recovery");
   $("confirm").disabled = !canRun;
   dialog.returnValue = "";
   dialog.showModal();
@@ -714,6 +876,7 @@ async function review(
     () => {
       if (dialog.returnValue !== "confirm" || !canRun) return;
       const deleting = action === "Delete permanently";
+      const deletingLeftovers = action === "Delete leftovers permanently";
       const uninstalling = action === "Uninstall";
       const launcherOnly = action === "Remove launcher";
       const updating = action === "Install update";
@@ -721,9 +884,11 @@ async function review(
         ? "Installing update…"
         : deleting
           ? "Deleting from Recovery…"
-          : uninstalling
-            ? "Uninstall in progress…"
-            : "Moving selected entries…";
+          : deletingLeftovers
+            ? "Deleting selected leftovers…"
+            : uninstalling
+              ? "Uninstall in progress…"
+              : "Moving selected entries…";
       work(label, async () => {
         const report = await invoke("confirm", { token: result.token });
         if (updating) {
@@ -736,7 +901,14 @@ async function review(
         }
         let message = "No selected items were moved.";
         if (deleting) message = "Item permanently deleted.";
-        else if (uninstalling) message = "Application uninstalled.";
+        else if (deletingLeftovers) {
+          message = report.completed
+            ? report.completed +
+              (report.completed === 1
+                ? " item permanently deleted."
+                : " items permanently deleted.")
+            : "No selected items were permanently deleted.";
+        } else if (uninstalling) message = "Application uninstalled.";
         else if (launcherOnly) message = "Launcher moved to Recovery.";
         else if (report.completed) {
           message =
@@ -746,6 +918,11 @@ async function review(
               : " items moved to Recovery.");
         }
         await afterOperation(report, message);
+        if (uninstalledApp && report.completed) {
+          state.recentApp = null;
+          state.recentSelection.clear();
+          offerLeftoverScan(uninstalledApp);
+        }
       });
     },
     { once: true },
@@ -756,11 +933,13 @@ async function afterOperation(report: ResultReport, message: string) {
   state.loaded = false;
   state.snapshots = {};
   state.recovery = null;
-  state.selection.clear();
+  state.uninstallHistory = null;
+  state.historyError = "";
+  cleanupSelection().clear();
   const details = [...report.warnings];
   try {
     await fetchView(state.view, false);
-    details.push(...(state.snapshots[state.view]?.warnings ?? []));
+    details.push(...(state.snapshots[snapshotKey(state.view)]?.warnings ?? []));
   } catch (error) {
     details.push("Could not refresh the view. " + error);
   }
@@ -870,19 +1049,43 @@ $("show-more").addEventListener("click", () => {
   renderApps();
   $("app-list").querySelectorAll("button")[index]?.focus();
 });
+$("history-more").addEventListener("click", () => {
+  const firstNew = state.historyLimit;
+  state.historyLimit += 50;
+  renderHistory();
+  const row = $("history-rows").children[firstNew];
+  if (row instanceof HTMLElement) {
+    row.tabIndex = -1;
+    row.focus();
+  }
+});
 $("back").addEventListener("click", () => closeDetails(true));
-$("cleanup-review").addEventListener("click", () =>
-  review(
+function reviewCleanup(permanent: boolean) {
+  return review(
     "Checking selected entries…",
-    "Move selected entries to Recovery?",
-    "Move to Recovery",
+    permanent
+      ? "Permanently delete selected leftovers?"
+      : "Move selected entries to Recovery?",
+    permanent ? "Delete leftovers permanently" : "Move to Recovery",
     () =>
       invoke("preview_cleanup", {
-        paths: [...state.selection],
+        paths: [...cleanupSelection()],
         launchers: state.view === "launchers",
+        recent: snapshotKey(state.view) === "recent",
+        permanent,
       }),
-  ),
-);
+  );
+}
+
+$("all-leftovers").addEventListener("click", () => {
+  if (state.busy) return;
+  state.recentApp = null;
+  state.recentSelection.clear();
+  delete state.snapshots.recent;
+  selectView("leftovers", true);
+});
+$("cleanup-review").addEventListener("click", () => reviewCleanup(false));
+$("cleanup-delete").addEventListener("click", () => reviewCleanup(true));
 $("theme").addEventListener("change", async () => {
   const old = state.theme;
   const selected = $("theme").value;

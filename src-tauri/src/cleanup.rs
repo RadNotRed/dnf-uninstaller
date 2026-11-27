@@ -81,6 +81,74 @@ pub struct Recovery {
 #[derive(Default, Deserialize, Serialize)]
 pub struct History {
     pub removed_ids: BTreeSet<String>,
+    #[serde(default)]
+    uninstalls: Vec<UninstallEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    earlier_ids: Option<BTreeSet<String>>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct UninstallEntry {
+    name: String,
+    app_id: String,
+    source: String,
+    version: String,
+    removed_at: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct UninstallHistory {
+    entries: Vec<UninstallEntry>,
+    earlier_ids: BTreeSet<String>,
+}
+
+const SETTINGS_LIMIT: u64 = 1024 * 1024;
+const HISTORY_LIMIT: u64 = 16 * SETTINGS_LIMIT;
+
+impl History {
+    pub fn read(path: &Path) -> Result<Self, String> {
+        read_json_bounded(path, HISTORY_LIMIT)
+    }
+
+    pub fn recent_first(self) -> UninstallHistory {
+        let Self {
+            removed_ids,
+            mut uninstalls,
+            earlier_ids,
+        } = self;
+        uninstalls.reverse();
+        UninstallHistory {
+            entries: uninstalls,
+            earlier_ids: earlier_ids.unwrap_or(removed_ids),
+        }
+    }
+
+    pub fn record(
+        path: &Path,
+        ids: &BTreeSet<String>,
+        app: &inventory::Application,
+    ) -> Result<(), String> {
+        let folder = path.parent().ok_or("Missing history directory.")?;
+        let dir = open_directory(folder, true)?;
+        rustix::fs::flock(&dir, rustix::fs::FlockOperation::LockExclusive)
+            .map_err(|error| io_error(path, error))?;
+        let mut history = Self::read(path)?;
+        history
+            .earlier_ids
+            .get_or_insert_with(|| history.removed_ids.clone());
+        history.removed_ids.extend(ids.iter().cloned());
+        history.uninstalls.push(UninstallEntry {
+            name: app.name.clone(),
+            app_id: app.id.clone(),
+            source: app.source.into(),
+            version: app.version.clone(),
+            removed_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|time| time.as_secs()),
+        });
+        write_json_bounded(path, &history, HISTORY_LIMIT)
+    }
 }
 
 fn io_error(path: &Path, error: impl std::fmt::Display) -> String {
@@ -426,7 +494,8 @@ fn icon_candidates(locations: &Locations, entry: &Launcher) -> Vec<PathBuf> {
 pub fn scan_leftovers(
     locations: &Locations,
     inventory: &Inventory,
-    history: &History,
+    removed_ids: &BTreeSet<String>,
+    recent_only: bool,
     cancel: &AtomicBool,
 ) -> Result<(Vec<Candidate>, Vec<String>), String> {
     let mut rows = BTreeMap::new();
@@ -454,12 +523,15 @@ pub fn scan_leftovers(
                     let Some(id) = file_name.to_str() else {
                         continue;
                     };
-                    if !inventory::identifier(id) || installed.contains(id) {
+                    if !inventory::identifier(id)
+                        || installed.contains(id)
+                        || (recent_only && !removed_ids.contains(id))
+                    {
                         continue;
                     }
                     let path = entry.path();
                     if path.is_dir()
-                        && (history.removed_ids.contains(id)
+                        && (removed_ids.contains(id)
                             || ["data", "cache", "config", ".local"].iter().any(|name| {
                                 fs::symlink_metadata(path.join(name)).is_ok_and(|m| m.is_dir())
                             }))
@@ -488,7 +560,7 @@ pub fn scan_leftovers(
     }
 
     if inventory.rpm_complete && inventory.flatpak_complete && inventory.warnings.is_empty() {
-        for id in &history.removed_ids {
+        for id in removed_ids {
             inventory::check_cancel(cancel)?;
             if !inventory::identifier(id) || installed.contains(id.as_str()) {
                 continue;
@@ -513,7 +585,7 @@ pub fn scan_leftovers(
         }
     }
 
-    if inventory.warnings.is_empty() {
+    if !recent_only && inventory.warnings.is_empty() {
         for entry in &inventory.launchers {
             inventory::check_cancel(cancel)?;
             if entry.icon.is_empty()
@@ -949,6 +1021,76 @@ pub fn revalidate(locations: &Locations, candidate: &Candidate) -> Result<Identi
     Ok(identity)
 }
 
+#[derive(Serialize)]
+pub struct LeftoverContents {
+    entries: Vec<LeftoverEntry>,
+    more: bool,
+}
+
+#[derive(Serialize)]
+struct LeftoverEntry {
+    name: String,
+    folder: bool,
+    browsable: bool,
+}
+
+pub fn leftover_contents(
+    locations: &Locations,
+    candidate: &Candidate,
+    folders: &[String],
+) -> Result<LeftoverContents, String> {
+    if folders.len() > 16 {
+        return Err("Open the folder in your file manager to browse further.".into());
+    }
+    let identity = revalidate(locations, candidate)?;
+    let mut dir = secure_dir(&candidate.path)?;
+    let stat = rustix::fs::fstat(&dir).map_err(|error| io_error(&candidate.path, error))?;
+    if Identity::from(stat) != identity {
+        return Err("The folder changed. Scan again.".into());
+    }
+    for name in folders {
+        if !matches!(
+            Path::new(name).components().next(),
+            Some(Component::Normal(component)) if component == name.as_str()
+        ) {
+            return Err("Invalid folder name.".into());
+        }
+        dir = rustix::fs::openat2(
+            &dir,
+            name.as_str(),
+            DIRECTORY,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_XDEV | ResolveFlags::NO_SYMLINKS,
+        )
+        .map_err(|error| format!("Could not open the subfolder: {error}"))?;
+    }
+    let mut entries = Vec::new();
+    let mut more = false;
+    let iter =
+        rustix::fs::Dir::read_from(&dir).map_err(|error| io_error(&candidate.path, error))?;
+    for entry in iter {
+        let entry = entry.map_err(|error| io_error(&candidate.path, error))?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        if entries.len() == 40 {
+            more = true;
+            break;
+        }
+        let stat = rustix::fs::statat(&dir, name, NOFOLLOW)
+            .map_err(|error| io_error(&candidate.path, error))?;
+        let folder = FileType::from_raw_mode(stat.st_mode) == FileType::Directory;
+        entries.push(LeftoverEntry {
+            name: name.to_string_lossy().into_owned(),
+            folder,
+            browsable: folder && name.to_str().is_ok() && folders.len() < 16,
+        });
+    }
+    entries.sort_unstable_by(|first, second| first.name.cmp(&second.name));
+    Ok(LeftoverContents { entries, more })
+}
+
 pub fn move_to_recovery(locations: &Locations, candidate: &Candidate) -> Result<Recovery, String> {
     let identity = revalidate(locations, candidate)?;
     let root = open_recovery(locations, true)?.ok_or("Could not open recovery directory.")?;
@@ -1164,6 +1306,13 @@ pub fn refresh_launchers(locations: &Locations) -> Result<(), String> {
 }
 
 pub fn read_json<T: Default + for<'a> Deserialize<'a>>(path: &Path) -> Result<T, String> {
+    read_json_bounded(path, SETTINGS_LIMIT)
+}
+
+fn read_json_bounded<T: Default + for<'a> Deserialize<'a>>(
+    path: &Path,
+    limit: u64,
+) -> Result<T, String> {
     if fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
         return Ok(T::default());
     }
@@ -1178,22 +1327,38 @@ pub fn read_json<T: Default + for<'a> Deserialize<'a>>(path: &Path) -> Result<T,
     let file = File::from(file);
     if !file
         .metadata()
-        .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= 1024 * 1024)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= limit)
     {
         return Err(io_error(
             path,
-            "expected a regular settings file no larger than 1 MiB",
+            format!(
+                "expected a regular file no larger than {} MiB",
+                limit / (1024 * 1024)
+            ),
         ));
     }
-    serde_json::from_reader(file.take(1024 * 1024)).map_err(|error| io_error(path, error))
+    serde_json::from_reader(file.take(limit)).map_err(|error| io_error(path, error))
 }
 
 pub fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    write_json_bounded(path, value, SETTINGS_LIMIT)
+}
+
+fn write_json_bounded(path: &Path, value: &impl Serialize, limit: u64) -> Result<(), String> {
     let dir = open_directory(path.parent().ok_or("Missing settings directory.")?, true)?;
     let anchored = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
     let mut temp = tempfile::NamedTempFile::new_in(&anchored).map_err(|e| io_error(path, e))?;
     serde_json::to_writer(&mut temp, value).map_err(|e| io_error(path, e))?;
     temp.flush().map_err(|e| io_error(path, e))?;
+    if temp
+        .as_file()
+        .metadata()
+        .map_err(|e| io_error(path, e))?
+        .len()
+        > limit
+    {
+        return Err(io_error(path, "the file reached its size limit"));
+    }
     temp.as_file().sync_all().map_err(|e| io_error(path, e))?;
     temp.persist(anchored.join(path.file_name().ok_or("Missing settings filename.")?))
         .map_err(|e| io_error(path, e))?;
@@ -1380,6 +1545,82 @@ mod tests {
         assert!(bin.is_dir() && desktop.is_file() && autostart.is_file());
         fs::remove_file(bin.join("build.txt")).unwrap();
         assert!(toolbox_candidates(&layout, &bin).is_err());
+    }
+
+    #[test]
+    fn uninstall_history_retains_earlier_ids_and_records_repeated_removals() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history.json");
+        fs::write(&path, r#"{"removed_ids":["org.example.Earlier"]}"#).unwrap();
+        let before = History::read(&path).unwrap().recent_first();
+        assert!(before.entries.is_empty());
+        assert!(before.earlier_ids.contains("org.example.Earlier"));
+        let mut app = inventory::Application {
+            key: "appimage-key".into(),
+            name: "Example".into(),
+            source: "AppImage",
+            version: "1".into(),
+            id: String::new(),
+            summary: String::new(),
+            origin: String::new(),
+            launcher: None,
+            removable: true,
+            launcher_removable: false,
+            icon: String::new(),
+            install: Install::AppImage(temp.path().join("Example.AppImage")),
+        };
+        History::record(&path, &BTreeSet::new(), &app).unwrap();
+        app.version = "2".into();
+        let ids = ["org.example.Earlier".into(), "org.example.New".into()].into();
+        History::record(&path, &ids, &app).unwrap();
+        let history = History::read(&path).unwrap();
+        assert!(history.removed_ids.contains("org.example.New"));
+        let newest_first = history.recent_first();
+        assert_eq!(newest_first.earlier_ids, before.earlier_ids);
+        assert_eq!(newest_first.entries.len(), 2);
+        assert_eq!(newest_first.entries[0].version, "2");
+        assert_eq!(newest_first.entries[1].version, "1");
+        assert!(newest_first.entries[0].removed_at.is_some());
+    }
+
+    #[test]
+    fn recent_leftovers_only_include_related_paths_and_preview_without_following_links() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = locations(temp.path());
+        let id = "org.example.Removed";
+        let cache = layout.cache.join(id);
+        fs::create_dir_all(cache.join("subfolder")).unwrap();
+        let flatpak_data = layout.home.join(".var/app");
+        fs::create_dir_all(flatpak_data.join(id).join("data")).unwrap();
+        fs::create_dir_all(flatpak_data.join("org.example.Unrelated").join("data")).unwrap();
+        symlink(cache.join("subfolder"), cache.join("link")).unwrap();
+        let removed_ids = [id.to_owned()].into();
+        let inventory = Inventory {
+            flatpak_complete: true,
+            rpm_complete: true,
+            ..Inventory::default()
+        };
+        let cancel = AtomicBool::new(false);
+        let (items, _) = scan_leftovers(&layout, &inventory, &removed_ids, true, &cancel).unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|item| item.path == flatpak_data.join(id)));
+        let candidate = items.iter().find(|item| item.path == cache).unwrap();
+        let contents = leftover_contents(&layout, candidate, &[]).unwrap();
+        assert_eq!(contents.entries.len(), 2);
+        assert_eq!(contents.entries[0].name, "link");
+        assert!(!contents.entries[0].folder);
+        assert!(contents.entries[1].folder);
+        assert!(leftover_contents(&layout, candidate, &["link".into()]).is_err());
+        assert!(leftover_contents(&layout, candidate, &["subfolder/..".into()]).is_err());
+        assert!(
+            leftover_contents(&layout, candidate, &["subfolder".into()])
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        fs::rename(&cache, cache.with_extension("old")).unwrap();
+        symlink(cache.with_extension("old"), &cache).unwrap();
+        assert!(leftover_contents(&layout, candidate, &[]).is_err());
     }
 
     #[test]

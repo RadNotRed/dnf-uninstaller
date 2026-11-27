@@ -154,6 +154,8 @@ p {
   margin: 0;
 }
 h1 {
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 1.5rem;
   line-height: 1.2;
   font-weight: 680;
@@ -414,6 +416,21 @@ h2 {
   flex-wrap: wrap;
   gap: 8px;
 }
+#recovery > h2 {
+  margin-bottom: 4px;
+}
+.history {
+  margin-top: 24px;
+}
+.history > h2 {
+  margin-bottom: 8px;
+}
+#history-more {
+  margin-top: 8px;
+}
+.history-date {
+  flex: none;
+}
 .row-title {
   font-weight: 620;
   display: block;
@@ -546,4 +563,39 @@ button.destructive:hover:not(:disabled) {
   .navigation > [data-view="settings"] {
     margin-inline-start: 0;
   }
+}
+
+#cleanup-selection {
+  margin-block: 4px 8px;
+}
+.leftover-folder {
+  flex: none;
+  padding-inline: 8px;
+}
+.leftover-details {
+  margin-top: 8px;
+}
+.leftover-details summary {
+  width: fit-content;
+  min-height: 24px;
+  cursor: pointer;
+}
+.leftover-contents {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0 8px;
+}
+.leftover-contents li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding-block: 4px;
+  overflow-wrap: anywhere;
+}
+.leftover-contents svg {
+  flex: none;
+}
+.leftover-contents details {
+  flex: 1;
+  min-width: 0;
 }

@@ -8,7 +8,7 @@ use base64::Engine;
 use gtk::{gio, prelude::*};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
@@ -48,6 +48,8 @@ struct Session {
     inventory: Option<Arc<Inventory>>,
     launchers: Vec<Candidate>,
     leftovers: Vec<Candidate>,
+    recent: Option<BTreeSet<String>>,
+    recent_leftovers: Vec<Candidate>,
     pending: Option<(u64, Instant, Action)>,
 }
 
@@ -115,7 +117,11 @@ impl Core {
     }
 
     fn invalidate(&self) -> Result<(), String> {
-        *self.session()? = Session::default();
+        let mut session = self.session()?;
+        *session = Session {
+            recent: session.recent.take(),
+            ..Session::default()
+        };
         Ok(())
     }
 }
@@ -134,7 +140,11 @@ enum Action {
         items: Vec<String>,
         files: Vec<Candidate>,
     },
-    Cleanup(Vec<Candidate>),
+    Cleanup {
+        selections: Vec<Candidate>,
+        recent: bool,
+        permanent: bool,
+    },
     RemoveLauncher(Box<Candidate>),
     Update(String),
     Delete(Recovery),
@@ -388,6 +398,7 @@ async fn scan_cleanup(
     app: AppHandle,
     launchers: bool,
     refresh: bool,
+    recent: Option<bool>,
     state: State<'_, Arc<Core>>,
 ) -> Result<Scan<Vec<Candidate>>, String> {
     let core = Arc::clone(&state);
@@ -398,17 +409,23 @@ async fn scan_cleanup(
         }
         let inventory = core.inventory(refresh)?;
         let mut warnings = inventory.warnings.clone();
+        let recent = recent.unwrap_or(false);
+        if launchers && recent {
+            return Err("Choose a single scan.".into());
+        }
         let items = if launchers {
             let mut items = cleanup::scan_launchers(&core.locations, &inventory, &core.canceled)?;
             add_icon_diagnostics(&app, &core, &inventory, &mut items)?;
             core.session()?.launchers = items.clone();
             items
         } else {
-            let history = load_history(&core, &mut warnings);
-            let (items, extra) =
-                cleanup::scan_leftovers(&core.locations, &inventory, &history, &core.canceled)?;
-            warnings.extend(extra);
-            core.session()?.leftovers = items.clone();
+            let items = scan_leftovers(&core, &inventory, recent, &mut warnings)?;
+            let mut session = core.session()?;
+            if recent {
+                session.recent_leftovers = items.clone();
+            } else {
+                session.leftovers = items.clone();
+            }
             items
         };
         Ok(Scan { items, warnings })
@@ -417,7 +434,7 @@ async fn scan_cleanup(
 }
 
 fn load_history(core: &Core, warnings: &mut Vec<String>) -> History {
-    match cleanup::read_json(&core.history_path()) {
+    match History::read(&core.history_path()) {
         Ok(history) => history,
         Err(error) => {
             warnings.push(error);
@@ -426,10 +443,98 @@ fn load_history(core: &Core, warnings: &mut Vec<String>) -> History {
     }
 }
 
+fn scan_leftovers(
+    core: &Core,
+    inventory: &Inventory,
+    recent: bool,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<Candidate>, String> {
+    let removed_ids = if recent {
+        core.session()?
+            .recent
+            .clone()
+            .ok_or("Uninstall an app before scanning its leftovers.")?
+    } else {
+        load_history(core, warnings).removed_ids
+    };
+    let (items, extra) = cleanup::scan_leftovers(
+        &core.locations,
+        inventory,
+        &removed_ids,
+        recent,
+        &core.canceled,
+    )?;
+    warnings.extend(extra);
+    Ok(items)
+}
+
+fn recent_candidate(core: &Core, path: &Path) -> Result<Candidate, String> {
+    core.session()?
+        .recent_leftovers
+        .iter()
+        .find(|candidate| candidate.path == path && candidate.selectable)
+        .cloned()
+        .ok_or_else(|| "This entry is no longer available. Scan again.".into())
+}
+
+#[tauri::command]
+async fn leftover_contents(
+    path: PathBuf,
+    folders: Vec<String>,
+    state: State<'_, Arc<Core>>,
+) -> Result<cleanup::LeftoverContents, String> {
+    let core = Arc::clone(&state);
+    blocking(move || {
+        let candidate = recent_candidate(&core, &path)?;
+        cleanup::leftover_contents(&core.locations, &candidate, &folders)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn open_leftover(
+    app: AppHandle,
+    path: PathBuf,
+    state: State<'_, Arc<Core>>,
+) -> Result<(), String> {
+    let core = Arc::clone(&state);
+    blocking(move || {
+        let _work = core.begin(false)?;
+        let candidate = recent_candidate(&core, &path)?;
+        cleanup::revalidate(&core.locations, &candidate)?;
+        let folder = if candidate.file_type == "Folder" {
+            candidate.path
+        } else {
+            candidate
+                .path
+                .parent()
+                .ok_or("No containing folder.")?
+                .to_owned()
+        };
+        cleanup::secure_dir(&folder)?;
+        on_main(&app, move || {
+            let manager = gio::AppInfo::default_for_type("inode/directory", false)
+                .ok_or("No default file manager was found.")?;
+            manager
+                .launch(&[gio::File::for_path(folder)], gio::AppLaunchContext::NONE)
+                .map_err(|error| format!("Could not open the file manager: {error}"))
+        })?
+    })
+    .await
+}
+
 #[tauri::command]
 async fn recovery(state: State<'_, Arc<Core>>) -> Result<Vec<Recovery>, String> {
     let core = Arc::clone(&state);
     blocking(move || cleanup::list_recovery(&core.locations)).await
+}
+
+#[tauri::command]
+async fn uninstall_history(
+    state: State<'_, Arc<Core>>,
+) -> Result<cleanup::UninstallHistory, String> {
+    let path = state.history_path();
+    blocking(move || Ok(History::read(&path)?.recent_first())).await
 }
 
 #[tauri::command]
@@ -558,6 +663,8 @@ async fn preview_delete(id: String, state: State<'_, Arc<Core>>) -> Result<Confi
 async fn preview_cleanup(
     paths: Vec<PathBuf>,
     launchers: bool,
+    recent: Option<bool>,
+    permanent: Option<bool>,
     state: State<'_, Arc<Core>>,
 ) -> Result<Confirmation, String> {
     let core = Arc::clone(&state);
@@ -566,9 +673,16 @@ async fn preview_cleanup(
         if paths.is_empty() || paths.len() > 100 {
             return Err("Select between 1 and 100 entries.".into());
         }
+        let recent = recent.unwrap_or(false);
+        let permanent = permanent.unwrap_or(false);
+        if (recent && launchers) || (permanent && !recent) {
+            return Err("Permanent deletion is available for post-uninstall leftovers.".into());
+        }
         let session = core.session()?;
         let available = if launchers {
             &session.launchers
+        } else if recent {
+            &session.recent_leftovers
         } else {
             &session.leftovers
         };
@@ -588,9 +702,11 @@ async fn preview_cleanup(
         }
         drop(session);
         let count = selections.iter().filter(|item| !item.confirmed).count();
-        let mut explanation =
+        let mut explanation = if permanent {
+            "This permanently deletes the selected entries and their contents. You cannot undo this action."
+        } else {
             "Selected entries will move to Recovery. Review their paths before continuing."
-                .to_owned();
+        }.to_owned();
         if count > 0 {
             explanation.push_str(&format!(" {count} may still be in use."));
         }
@@ -600,13 +716,17 @@ async fn preview_cleanup(
                 explanation,
                 authorization: None,
             },
-            Action::Cleanup(selections),
+            Action::Cleanup { selections, recent, permanent },
         )
     })
     .await
 }
 
-fn remember_uninstall(core: &Core, app: &Application, warnings: &mut Vec<String>) {
+fn remember_uninstall(
+    core: &Core,
+    app: &Application,
+    warnings: &mut Vec<String>,
+) -> BTreeSet<String> {
     let inventory = core.inventory(false);
     let mut ids = vec![app.id.clone()];
     if let Ok(inventory) = inventory {
@@ -618,39 +738,29 @@ fn remember_uninstall(core: &Core, app: &Application, warnings: &mut Vec<String>
                 .map(|other| other.id.clone()),
         );
     }
-    let ids: Vec<_> = ids
+    let recent = ids
         .into_iter()
         .filter(|id| inventory::identifier(id))
         .collect();
-    if ids.is_empty() {
-        return;
-    }
-    let path = core.history_path();
-    let mut history: History = match cleanup::read_json(&path) {
-        Ok(history) => history,
-        Err(error) => {
-            warnings.push(format!("Could not record application removal: {error}"));
-            return;
-        }
-    };
-    history.removed_ids.extend(ids);
-    if let Err(error) = cleanup::write_json(&path, &history) {
+    if let Err(error) = History::record(&core.history_path(), &recent, app) {
         warnings.push(format!("Could not record application removal: {error}"));
     }
+    recent
 }
 
-fn apply_cleanup(core: &Core, selections: Vec<Candidate>) -> Result<ResultReport, String> {
+fn apply_cleanup(
+    core: &Core,
+    selections: Vec<Candidate>,
+    recent: bool,
+    permanent: bool,
+) -> Result<ResultReport, String> {
     let inventory = core.inventory(true)?;
     let mut warnings = inventory.warnings.clone();
     let launchers = selections.iter().any(|item| item.kind == Kind::Launcher);
     let current = if launchers {
         cleanup::scan_launchers(&core.locations, &inventory, &core.canceled)?
     } else {
-        let history = load_history(core, &mut warnings);
-        let (current, extra) =
-            cleanup::scan_leftovers(&core.locations, &inventory, &history, &core.canceled)?;
-        warnings.extend(extra);
-        current
+        scan_leftovers(core, &inventory, recent, &mut warnings)?
     };
     let mut completed = 0;
     for item in selections {
@@ -659,6 +769,7 @@ fn apply_cleanup(core: &Core, selections: Vec<Candidate>) -> Result<ResultReport
                 && snapshot.kind == item.kind
                 && snapshot.selectable
                 && snapshot.identity == item.identity
+                && (!permanent || snapshot.bytes == item.bytes)
         }) {
             warnings.push(format!(
                 "{} changed or is no longer a cleanup candidate.",
@@ -666,8 +777,15 @@ fn apply_cleanup(core: &Core, selections: Vec<Candidate>) -> Result<ResultReport
             ));
             continue;
         }
-        match cleanup::move_to_recovery(&core.locations, &item) {
-            Ok(_) => completed += 1,
+        let outcome = cleanup::move_to_recovery(&core.locations, &item).and_then(|record| {
+            if permanent {
+                cleanup::delete_permanently(&core.locations, &record)
+            } else {
+                Ok(())
+            }
+        });
+        match outcome {
+            Ok(()) => completed += 1,
             Err(error) => warnings.push(error),
         }
     }
@@ -732,7 +850,9 @@ async fn confirm(
             return Err("The preview expired or changed. Review the operation again.".into());
         }
         match action {
-            Action::Cleanup(items) => apply_cleanup(&core, items),
+            Action::Cleanup { selections, recent, permanent } => {
+                apply_cleanup(&core, selections, recent, permanent)
+            }
             Action::Update(version) => {
                 updates::apply(&version, |line| { let _ = app.emit("operation-progress", line); })?;
                 Ok(ResultReport { completed: 1, warnings: Vec::new() })
@@ -779,11 +899,10 @@ async fn confirm(
                     })(),
                     Install::Manual => Err("Manual removal is unavailable.".into()),
                 };
-                if result.is_ok() {
-                    remember_uninstall(&core, &target, &mut warnings);
-                }
+                let recent = result.is_ok().then(|| remember_uninstall(&core, &target, &mut warnings));
                 core.invalidate()?;
                 result?;
+                core.session()?.recent = recent;
                 Ok(ResultReport {
                     completed: 1,
                     warnings,
@@ -836,7 +955,10 @@ pub fn run() -> Result<(), String> {
             cancel_scan,
             app_icons,
             scan_cleanup,
+            leftover_contents,
+            open_leftover,
             recovery,
+            uninstall_history,
             restore,
             preview_uninstall,
             check_updates,

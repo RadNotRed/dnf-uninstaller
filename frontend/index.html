@@ -23,6 +23,12 @@
         <path d="M6 4h8l4 4v12H6z" />
         <path d="M14 4v5h5M9 13h6m-6 3h6" />
       </symbol>
+      <symbol id="folder-icon" viewBox="0 0 24 24">
+        <path
+          d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"
+        />
+        <path d="M3 9h18" />
+      </symbol>
       <symbol id="launcher-icon" viewBox="0 0 24 24">
         <rect x="3" y="5" width="18" height="14" rx="2" />
         <path d="m7 10 3 2-3 2m6 0h4" />
@@ -85,6 +91,7 @@
           <button id="update-ready" type="button" hidden>
             Update available
           </button>
+          <button id="all-leftovers" type="button" hidden>All leftovers</button>
           <button id="refresh" type="button">
             <svg><use href="#refresh-icon" /></svg>
             <span id="refresh-label">Refresh</span>
@@ -162,15 +169,22 @@
         <p class="context" id="cleanup-context"></p>
         <div class="section-toolbar">
           <p class="count" id="cleanup-count"></p>
-          <button id="cleanup-review" type="button" disabled>
-            Review selection
-          </button>
+          <div class="actions">
+            <button id="cleanup-review" type="button" disabled>
+              Review selection
+            </button>
+            <button id="cleanup-delete" type="button" hidden disabled>
+              Delete selected…
+            </button>
+          </div>
         </div>
+        <p class="count" id="cleanup-selection" role="status" hidden></p>
         <ul class="rows" id="cleanup-rows"></ul>
         <p class="empty" id="cleanup-empty" hidden></p>
       </section>
 
       <section id="recovery" aria-labelledby="title" hidden>
+        <h2>Recoverable files</h2>
         <p class="context">
           Files moved here can be restored to their original paths.
         </p>
@@ -178,6 +192,13 @@
         <p class="empty" id="recovery-empty" hidden>
           There are no items in Recovery.
         </p>
+        <section class="history" aria-labelledby="history-title">
+          <h2 id="history-title">Uninstall history</h2>
+          <ul class="rows" id="history-rows"></ul>
+          <p class="empty" id="history-empty" hidden>No uninstalls recorded.</p>
+          <p id="history-error" class="empty" role="status" hidden></p>
+          <button type="button" id="history-more" hidden>Show more</button>
+        </section>
       </section>
 
       <section id="settings" aria-labelledby="title" hidden>
@@ -237,6 +258,23 @@
         </div>
         <p>Uninstall Linux apps and clean up leftover files.</p>
         <div class="dialog-actions"><button autofocus>Close</button></div>
+      </form>
+    </dialog>
+
+    <dialog
+      id="leftover-offer"
+      aria-labelledby="leftover-offer-title"
+      aria-describedby="leftover-offer-description"
+    >
+      <form method="dialog">
+        <h2 id="leftover-offer-title"></h2>
+        <p id="leftover-offer-description">
+          Scan for settings, caches, and other files left by this app?
+        </p>
+        <div class="dialog-actions">
+          <button value="ignore" autofocus>Ignore</button>
+          <button value="scan">Scan for leftovers</button>
+        </div>
       </form>
     </dialog>
 

@@ -41,6 +41,17 @@ export interface Recovery {
   kind: Kind;
 }
 
+export interface UninstallHistory {
+  entries: {
+    name: string;
+    app_id: string;
+    source: string;
+    version: string;
+    removed_at: number | null;
+  }[];
+  earlier_ids: string[];
+}
+
 export interface Scan<T> {
   items: T[];
   warnings: string[];
@@ -75,15 +86,35 @@ type Commands = {
   configuration: [undefined, Configuration];
   confirm: [{ token: number }, ResultReport];
   installed: [{ refresh: boolean }, Scan<Application>];
-  preview_cleanup: [{ paths: string[]; launchers: boolean }, Confirmation];
+  leftover_contents: [
+    { path: string; folders: string[] },
+    {
+      entries: { name: string; folder: boolean; browsable: boolean }[];
+      more: boolean;
+    },
+  ];
+  open_leftover: [{ path: string }, void];
+  preview_cleanup: [
+    {
+      paths: string[];
+      launchers: boolean;
+      recent?: boolean;
+      permanent?: boolean;
+    },
+    Confirmation,
+  ];
   preview_delete: [{ id: string }, Confirmation];
   preview_remove_launcher: [{ key: string }, Confirmation];
   preview_uninstall: [{ key: string }, Confirmation];
   preview_update: [{ version: string }, Confirmation];
   recovery: [undefined, Recovery[]];
+  uninstall_history: [undefined, UninstallHistory];
   restore: [{ id: string }, ResultReport];
   save_theme: [{ theme: Theme }, void];
-  scan_cleanup: [{ launchers: boolean; refresh: boolean }, Scan<Candidate>];
+  scan_cleanup: [
+    { launchers: boolean; refresh: boolean; recent?: boolean },
+    Scan<Candidate>,
+  ];
   show_window: [undefined, void];
 };
 
