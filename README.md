@@ -4,14 +4,14 @@ A desktop uninstaller for Fedora. Remove RPMs, Flatpaks, AppImages, and supporte
 
 ## Install
 
-Download the [Fedora RPM](https://radnotred.github.io/dnf-uninstaller/rpm/x86_64/application-cleanup-0.1.6-1.x86_64.rpm) and [signing key](https://radnotred.github.io/dnf-uninstaller/RPM-GPG-KEY-application-cleanup.asc).
+Download the [Fedora RPM](https://radnotred.github.io/dnf-uninstaller/rpm/x86_64/application-cleanup-0.1.7-1.x86_64.rpm) and [signing key](https://radnotred.github.io/dnf-uninstaller/RPM-GPG-KEY-application-cleanup.asc).
 
 Check the key fingerprint. It should be `9D5F E8B7 282D 258E 10D1 D1DA C758 D9F9 9751 9514`.
 
 ```sh
 gpg --show-keys --fingerprint RPM-GPG-KEY-application-cleanup.asc
 sudo rpmkeys --import RPM-GPG-KEY-application-cleanup.asc
-sudo dnf5 --setopt=localpkg_gpgcheck=1 install ./application-cleanup-0.1.6-1.x86_64.rpm
+sudo dnf5 --setopt=localpkg_gpgcheck=1 install ./application-cleanup-0.1.7-1.x86_64.rpm
 ```
 
 Check for new versions under **Settings → Software updates**.
