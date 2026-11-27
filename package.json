@@ -1,0 +1,15 @@
+{
+  "name": "linux-rust-uninstaller",
+  "private": true,
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "format": "prettier --write \"frontend/**/*.{html,css,js}\" \"src-tauri/tauri.conf.json\" \"package*.json\" \".github/**/*.yml\" README.md",
+    "format:check": "prettier --check \"frontend/**/*.{html,css,js}\" \"src-tauri/tauri.conf.json\" \"package*.json\" \".github/**/*.yml\" README.md",
+    "lint:js": "node --check frontend/app.js"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.6",
+    "prettier": "3.10.1"
+  }
+}

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD polkit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+<policyconfig>
+  <action id="dev.radnotred.application-cleanup.remove-rpm">
+    <description>Remove RPM packages with Application Cleanup</description>
+    <message>Administrator authentication is required to remove RPM packages with Application Cleanup</message>
+    <icon_name>linux-rust-uninstaller</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/linux-rust-uninstaller</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">--apply-rpm</annotate>
+  </action>
+</policyconfig>

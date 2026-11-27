@@ -1,0 +1,152 @@
+name: Build and release
+
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+concurrency:
+  group: application-cleanup-${{ github.ref_type == 'tag' && 'release' || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container: fedora:45
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - name: Install Fedora build dependencies
+        run: |
+          dnf5 install -y git gcc rust cargo rustfmt clippy nodejs npm python3 \
+            openssl-devel webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel \
+            rpm-build rpm-sign gnupg2 createrepo_c desktop-file-utils libxml2 polkit
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Verify version and release tag
+        run: |
+          python3 - <<'PY'
+          import json, os, re, tomllib
+          from pathlib import Path
+
+          cargo = tomllib.loads(Path("src-tauri/Cargo.toml").read_text())["package"]["version"]
+          tauri = json.loads(Path("src-tauri/tauri.conf.json").read_text())["version"]
+          if cargo != tauri or not re.fullmatch(r"(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)){2}", cargo):
+              raise SystemExit("Cargo and Tauri must have the same numeric version.")
+          if os.environ["GITHUB_REF_TYPE"] == "tag" and os.environ["GITHUB_REF_NAME"] != f"v{cargo}":
+              raise SystemExit(f"Release tag must be v{cargo}.")
+          PY
+      - name: Check Prettier and JavaScript
+        run: |
+          npm run format:check
+          npm run lint:js
+      - name: Check Rust formatting, lints, and tests
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Validate the PolicyKit action
+        run: |
+          xmllint --nonet --noout --dtdvalid /usr/share/polkit-1/policyconfig-1.dtd src-tauri/linux/*.policy
+
+      - name: Read the GitHub Pages URL
+        if: github.ref_type == 'tag'
+        id: pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+
+      - name: Prepare the signed update repository configuration
+        if: github.ref_type == 'tag'
+        env:
+          RPM_SIGNING_PUBLIC_KEY: ${{ vars.RPM_SIGNING_PUBLIC_KEY }}
+          UPDATE_BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: bash scripts/release-rpm.sh prepare dist
+
+      - name: Build the Fedora RPM
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            npm run build -- --config "$PWD/dist/config/tauri.release.json" -- --locked
+          else
+            npm run build -- -- --locked
+          fi
+          rpm -Kv --nosignature src-tauri/target/release/bundle/rpm/*.rpm
+
+      - name: Upload the CI RPM
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fedora-45-x86_64
+          path: src-tauri/target/release/bundle/rpm/*.rpm
+          if-no-files-found: error
+
+      - name: Sign the RPM and repository metadata
+        if: github.ref_type == 'tag'
+        env:
+          RPM_SIGNING_PRIVATE_KEY: ${{ secrets.RPM_SIGNING_PRIVATE_KEY }}
+        run: bash scripts/release-rpm.sh sign dist src-tauri/target/release/bundle/rpm/*.rpm
+      - name: Upload release files
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-rpm
+          path: dist/assets/
+          if-no-files-found: error
+      - name: Upload the update repository
+        if: github.ref_type == 'tag'
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: dist/site/
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Verify release order
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
+          latest=$(printf '%s\n' "$releases" | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/' | sort -V | tail -n 1)
+          if [[ -n "$latest" && "$(printf '%s\n' "$latest" "$GITHUB_REF_NAME" | sort -V | tail -n 1)" != "$GITHUB_REF_NAME" ]]; then
+            echo "::error::A newer release already exists."
+            exit 1
+          fi
+      - name: Download the signed RPM
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-rpm
+          path: release
+      - name: Deploy the signed update repository
+        id: deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if ! gh release view --repo "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes "$GITHUB_REF_NAME" release/*
+          fi

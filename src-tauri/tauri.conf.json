@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Application Cleanup",
+  "version": "0.1.6",
+  "identifier": "dev.radnotred.application-cleanup",
+  "build": { "frontendDist": "../frontend" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Application Cleanup",
+        "visible": false,
+        "width": 960,
+        "height": 680,
+        "minWidth": 400,
+        "minHeight": 420
+      }
+    ],
+    "security": {
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost",
+      "capabilities": [
+        {
+          "identifier": "main-window",
+          "windows": ["main"],
+          "permissions": [
+            "core:event:allow-listen",
+            "core:event:allow-unlisten"
+          ]
+        }
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["rpm"],
+    "category": "Utility",
+    "shortDescription": "Uninstall applications and clean up leftover files",
+    "longDescription": "Inspect installed Linux applications, preview removal, and recover selectively cleaned files.",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/256x256.png"],
+    "linux": {
+      "rpm": {
+        "depends": ["dnf5", "polkit", "desktop-file-utils"],
+        "files": {
+          "/usr/share/polkit-1/actions/dev.radnotred.application-cleanup.remove-rpm.policy": "linux/dev.radnotred.application-cleanup.remove-rpm.policy"
+        }
+      }
+    }
+  }
+}
