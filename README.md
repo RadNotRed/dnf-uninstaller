@@ -50,7 +50,7 @@ npm run build
 
 A signed Fedora release installs a DNF repository and its public key. Application Cleanup checks that repository on launch and shows available upgrades in **Settings → Software updates**. You can also check manually. Review the version and confirm installation. DNF verifies the repository and the RPM, and Fedora handles administrator authentication. Reopen the app after updating.
 
-Local builds and ordinary CI artifacts are unsigned. They show the update setup status in Settings. Install the signed RPM from GitHub Releases to enroll in updates. Verify the release key fingerprint before first installation. The signing fingerprint for `RadNotRed/dnf-uninstaller` is `9D5F E8B7 282D 258E 10D1 D1DA C758 D9F9 9751 9514`. Then import the key and install the RPM with local signature checking enabled.
+Local builds and ordinary CI artifacts are unsigned. They show the update setup status in Settings. Install the signed RPM from GitHub Releases or the public update site to enroll in updates. Verify the release key fingerprint before first installation. The signing fingerprint for `RadNotRed/dnf-uninstaller` is `9D5F E8B7 282D 258E 10D1 D1DA C758 D9F9 9751 9514`. Then import the key and install the RPM with local signature checking enabled.
 
 ```sh
 gpg --show-keys --fingerprint RPM-GPG-KEY-application-cleanup.asc

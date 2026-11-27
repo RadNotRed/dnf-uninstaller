@@ -80,6 +80,8 @@ PY
     gpg --batch --verify "$site/repodata/repomd.xml.asc" "$site/repodata/repomd.xml"
     cp -- "$public_key" "$assets/RPM-GPG-KEY-application-cleanup.asc"
     (cd "$assets" && sha256sum -- "$filename" > "$filename.sha256")
+    cp -- "$assets/RPM-GPG-KEY-application-cleanup.asc" "$output/site/"
+    cp -- "$assets/$filename.sha256" "$site/"
     ;;
   *)
     printf 'Unknown release command %s\n' "$mode" >&2
