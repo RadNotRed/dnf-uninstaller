@@ -619,7 +619,9 @@ function renderDetails() {
           ? "Use the installation’s original removal method."
           : app.source === "RPM"
             ? "This package is protected or DNF5 is unavailable."
-            : "This AppImage is outside the supported removal locations.";
+            : app.source === "Snap"
+              ? "PolicyKit is required to remove Snap packages."
+              : "This AppImage is outside the supported removal locations.";
     container.append(node("p", hint, "detail-hint"));
   }
   if (app.launcher_removable) {

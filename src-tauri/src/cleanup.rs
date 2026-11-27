@@ -350,7 +350,11 @@ fn launcher_issue(
     inventory: &Inventory,
     entry: &Launcher,
 ) -> Option<(String, bool)> {
-    if entry.hidden {
+    if entry.hidden
+        || entry
+            .path
+            .starts_with(Path::new(crate::managed::SNAP_EXPORT).join("applications"))
+    {
         return None;
     }
     if !entry.flatpak.is_empty() && entry.conditional && entry.try_exec.is_empty() {
@@ -1665,6 +1669,7 @@ mod tests {
             hidden: false,
             conditional: false,
             flatpak: String::new(),
+            snap: String::new(),
             appimage_version: String::new(),
             rpm: None,
         };

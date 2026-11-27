@@ -1,6 +1,7 @@
 mod cleanup;
 mod desktop;
 mod inventory;
+mod managed;
 mod packages;
 mod updates;
 

@@ -271,7 +271,12 @@ async fn installed(
         let inventory = core.inventory(refresh)?;
         Ok(Scan {
             items: inventory.applications.clone(),
-            warnings: inventory.warnings.clone(),
+            warnings: inventory
+                .warnings
+                .iter()
+                .chain(&inventory.managed_warnings)
+                .cloned()
+                .collect(),
         })
     })
     .await
@@ -579,6 +584,7 @@ async fn preview_uninstall(
                 preview
             }
             Install::Flatpak { reference, scope } => packages::preview_flatpak(reference, scope)?,
+            Install::Managed { manager, .. } => manager.preview(&app)?,
             Install::AppImage(_) => {
                 files = cleanup::appimage_candidates(&core.locations, &app, &inventory)?;
                 let items = files.iter().map(|candidate| candidate.path.display().to_string()).collect();
@@ -740,7 +746,7 @@ fn remember_uninstall(
     }
     let recent = ids
         .into_iter()
-        .filter(|id| inventory::identifier(id))
+        .filter(|id| !matches!(app.install, Install::Managed { .. }) && inventory::identifier(id))
         .collect();
     if let Err(error) = History::record(&core.history_path(), &recent, app) {
         warnings.push(format!("Could not record application removal: {error}"));
@@ -884,6 +890,7 @@ async fn confirm(
                     Install::Flatpak { reference, scope } => {
                         packages::apply_flatpak(reference, scope, progress)
                     }
+                    Install::Managed { manager, .. } => manager.apply(&target, progress),
                     Install::AppImage(_) => move_application_files(&core, files, &mut warnings),
                     Install::Toolbox(path) => cleanup::check_app_closed(path, &target.name)
                         .and_then(|()| move_application_files(&core, files, &mut warnings)),

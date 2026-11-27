@@ -1,3 +1,4 @@
+use crate::managed::{self, Manager};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -36,6 +37,7 @@ impl Locations {
         system_data.extend([
             data.join("flatpak/exports/share"),
             "/var/lib/flatpak/exports/share".into(),
+            managed::SNAP_EXPORT.into(),
         ]);
         for dir in system_data {
             let dir = dir.join("applications");
@@ -72,7 +74,15 @@ fn absolute_env(name: &str) -> Option<PathBuf> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Install {
     Rpm(String),
-    Flatpak { reference: String, scope: String },
+    Flatpak {
+        reference: String,
+        scope: String,
+    },
+    Managed {
+        manager: Manager,
+        package: String,
+        revision: String,
+    },
     AppImage(PathBuf),
     Toolbox(PathBuf),
     Standalone(PathBuf),
@@ -109,6 +119,7 @@ pub struct Launcher {
     pub hidden: bool,
     pub conditional: bool,
     pub flatpak: String,
+    pub snap: String,
     pub appimage_version: String,
     pub rpm: Option<(String, String)>,
 }
@@ -119,6 +130,7 @@ pub struct Inventory {
     pub launchers: Vec<Launcher>,
     pub broken_links: Vec<(PathBuf, PathBuf)>,
     pub warnings: Vec<String>,
+    pub managed_warnings: Vec<String>,
     pub flatpak_complete: bool,
     pub rpm_complete: bool,
 }
@@ -206,6 +218,7 @@ pub(crate) fn launcher(
             || !get("AutostartCondition").is_empty()
             || get("X-GNOME-HiddenUnderSystemd") == "true",
         flatpak: get("X-Flatpak"),
+        snap: get("X-SnapInstanceName"),
         appimage_version: get("X-AppImage-Version"),
         rpm: None,
     })
@@ -547,6 +560,16 @@ pub fn scan(locations: &Locations, cancel: &AtomicBool) -> Result<Inventory, Str
             .warnings
             .push(format!("Flatpak inventory unavailable: {error}")),
     }
+    for manager in [Manager::Snap, Manager::Pipx, Manager::Cargo] {
+        check_cancel(cancel)?;
+        match manager.inventory() {
+            Ok((apps, warning)) => {
+                inventory.applications.extend(apps);
+                inventory.managed_warnings.extend(warning);
+            }
+            Err(error) => inventory.managed_warnings.push(error),
+        }
+    }
     check_cancel(cancel)?;
     let owners = match rpm_owners(cancel) {
         Ok(owners) => {
@@ -564,8 +587,22 @@ pub fn scan(locations: &Locations, cancel: &AtomicBool) -> Result<Inventory, Str
     let dnf_available = Path::new("/usr/bin/dnf5").is_file();
     let mut visited_manual = BTreeSet::new();
     let mut tracked_images = BTreeSet::new();
+    let snap_launchers = Path::new(managed::SNAP_EXPORT).join("applications");
     for entry in &mut inventory.launchers {
         check_cancel(cancel)?;
+        if entry.path.starts_with(&snap_launchers) {
+            if !entry.hidden
+                && let Some(app) = inventory.applications.iter_mut().find(|app| {
+                    app.source == "Snap" && app.id == entry.snap && app.launcher.is_none()
+                })
+            {
+                app.name.clone_from(&entry.name);
+                app.summary.clone_from(&entry.summary);
+                app.launcher = Some(entry.path.clone());
+                app.icon.clone_from(&entry.icon);
+            }
+            continue;
+        }
         entry.rpm = owners.get(&entry.path).cloned();
         if !entry.flatpak.is_empty() {
             for app in inventory
