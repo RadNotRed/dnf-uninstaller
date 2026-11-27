@@ -1,6 +1,49 @@
-const $ = (id) => document.getElementById(id);
-const native = window.__TAURI__;
-const invoke = (command, args) => native.core.invoke(command, args);
+import { invoke, listen } from "./ipc";
+import type {
+  Application,
+  Candidate,
+  Confirmation,
+  Recovery,
+  ResultReport,
+  Scan,
+  Theme,
+} from "./ipc";
+
+type ButtonId =
+  | "app-menu-button"
+  | "back"
+  | "cancel-scan"
+  | "check-updates"
+  | "cleanup-review"
+  | "confirm"
+  | "install-update"
+  | "refresh"
+  | "row-details"
+  | "row-remove-launcher"
+  | "row-uninstall"
+  | "show-about"
+  | "show-more"
+  | "update-ready";
+
+type ElementById = Record<ButtonId, HTMLButtonElement> & {
+  about: HTMLDialogElement;
+  "about-icon": HTMLImageElement;
+  confirmation: HTMLDialogElement;
+  search: HTMLInputElement;
+  sort: HTMLSelectElement;
+  source: HTMLSelectElement;
+  theme: HTMLSelectElement;
+  warnings: HTMLDetailsElement;
+};
+
+function $<Id extends string>(id: Id) {
+  const element = document.getElementById(id);
+  if (!element) throw new Error("Missing element: " + id);
+  return element as Id extends keyof ElementById
+    ? ElementById[Id]
+    : HTMLElement;
+}
+
 const titles = {
   installed: "Installed applications",
   leftovers: "Leftover scanner",
@@ -8,7 +51,9 @@ const titles = {
   recovery: "Recovery",
   settings: "Settings",
 };
-const kindNames = {
+type View = keyof typeof titles;
+
+const kindNames: Record<Candidate["kind"], string> = {
   Launcher: "Desktop launcher",
   Icon: "Application icon",
   FlatpakData: "Flatpak data",
@@ -20,42 +65,56 @@ const kindNames = {
   ToolboxBin: "Toolbox program files",
   StandaloneBinary: "Standalone executable",
 };
-const selectors = [...document.querySelectorAll("[data-view]")];
-const workspace = document.querySelector(".workspace");
+const selectors = [
+  ...document.querySelectorAll<HTMLButtonElement>("[data-view]"),
+];
+const workspace = $("app-workspace");
 const systemPreference = matchMedia("(prefers-color-scheme: dark)");
 const collator = new Intl.Collator(undefined, {
   sensitivity: "base",
   numeric: true,
 });
+type Snapshots = {
+  installed?: Scan<Application>;
+  leftovers?: Scan<Candidate>;
+  launchers?: Scan<Candidate>;
+  recovery?: never;
+  settings?: never;
+};
+
 const state = {
-  view: "installed",
+  view: "installed" as View,
   busy: false,
   cancelable: false,
-  theme: "system",
-  dark: null,
+  theme: "system" as Theme,
+  dark: null as boolean | null,
   rpmHelper: false,
-  apps: [],
+  apps: [] as Application[],
   loaded: false,
   key: "",
   limit: 60,
-  snapshots: new Map(),
-  recovery: null,
-  selection: new Set(),
-  icons: new Map(),
+  snapshots: {} as Snapshots,
+  recovery: null as Recovery[] | null,
+  selection: new Set<string>(),
+  icons: new Map<string, string | null>(),
   updateRepo: false,
   checkingUpdate: false,
-  updateVersion: null,
+  updateVersion: null as string | null,
   restartRequired: false,
 };
 
-function node(tag, value, className) {
+function node<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  value?: string | null,
+  className?: string,
+) {
   const item = document.createElement(tag);
   if (value !== undefined) item.textContent = value;
   if (className) item.className = className;
   return item;
 }
 
-function svg(name) {
+function svg(name: string) {
   const ns = "http://www.w3.org/2000/svg";
   const icon = document.createElementNS(ns, "svg");
   const use = document.createElementNS(ns, "use");
@@ -65,19 +124,21 @@ function svg(name) {
   return icon;
 }
 
-function updateIcons(key, data) {
+function updateIcons(key: string, data: string | null) {
   if (!data?.startsWith("data:image/png;base64,")) return;
-  document.querySelectorAll(".app-icon[data-app-key]").forEach((slot) => {
-    if (slot.dataset.appKey === key && !slot.querySelector("img")) {
-      const image = node("img");
-      image.alt = "";
-      image.src = data;
-      slot.append(image);
-    }
-  });
+  document
+    .querySelectorAll<HTMLElement>(".app-icon[data-app-key]")
+    .forEach((slot) => {
+      if (slot.dataset.appKey === key && !slot.querySelector("img")) {
+        const image = node("img");
+        image.alt = "";
+        image.src = data;
+        slot.append(image);
+      }
+    });
 }
 
-const pendingIcons = new Set();
+const pendingIcons = new Set<string>();
 let iconTimer = 0;
 async function loadIcons() {
   iconTimer = 0;
@@ -102,15 +163,18 @@ const iconObserver = new IntersectionObserver(
     for (const entry of entries) {
       if (!entry.isIntersecting) continue;
       iconObserver.unobserve(entry.target);
-      const key = entry.target.dataset.appKey;
-      if (!state.icons.has(key)) pendingIcons.add(key);
+      const key =
+        entry.target instanceof HTMLElement
+          ? entry.target.dataset.appKey
+          : undefined;
+      if (key && !state.icons.has(key)) pendingIcons.add(key);
     }
     if (pendingIcons.size && !iconTimer) iconTimer = setTimeout(loadIcons, 16);
   },
   { rootMargin: "80px" },
 );
 
-function appIcon(app) {
+function appIcon(app: Application) {
   const icon = node("span", undefined, "app-icon");
   icon.dataset.appKey = app.key;
   icon.append(svg("package-icon"));
@@ -126,19 +190,19 @@ function appIcon(app) {
   return icon;
 }
 
-function discardIcons(container) {
+function discardIcons(container: HTMLElement) {
   container
     .querySelectorAll(".app-icon")
     .forEach((item) => iconObserver.unobserve(item));
 }
 
-function notice(message, error = false) {
+function notice(message: string, error = false) {
   $("notice").hidden = !message;
   $("notice").textContent = message || "";
   $("notice").dataset.error = String(error);
 }
 
-function warnings(items, title = "Scan details") {
+function warnings(items: string[], title = "Scan details") {
   $("warnings").hidden = !items.length;
   $("warnings").open = false;
   $("warning-summary").textContent = title + " (" + items.length + ")";
@@ -198,12 +262,18 @@ function controls() {
   selectors.forEach((button) => {
     button.disabled = state.busy;
   });
-  document.querySelectorAll("[data-operation]").forEach((button) => {
-    button.disabled = state.busy;
-  });
+  document
+    .querySelectorAll<HTMLButtonElement | HTMLInputElement>("[data-operation]")
+    .forEach((button) => {
+      button.disabled = state.busy;
+    });
 }
 
-async function work(label, callback, cancelable = false) {
+async function work<T>(
+  label: string,
+  callback: () => Promise<T>,
+  cancelable = false,
+): Promise<T | undefined> {
   if (state.busy) return;
   state.busy = true;
   state.cancelable = cancelable;
@@ -230,7 +300,7 @@ function cleanupView() {
   return state.view === "leftovers" || state.view === "launchers";
 }
 
-function selectView(view, keyboardFocus = false) {
+function selectView(view: View, keyboardFocus = false) {
   if (state.busy) return;
   state.view = view;
   selectors.forEach((button) => {
@@ -242,9 +312,7 @@ function selectView(view, keyboardFocus = false) {
   ["installed", "cleanup", "recovery", "settings"].forEach((section) => {
     $(section).hidden = section !== (cleanupView() ? "cleanup" : view);
   });
-  $("refresh").querySelector("span").textContent = cleanupView()
-    ? "Scan again"
-    : "Refresh";
+  $("refresh-label").textContent = cleanupView() ? "Scan again" : "Refresh";
   $("cleanup-context").textContent =
     view === "launchers"
       ? "Check desktop entries for missing programs and unavailable icons. Select stale entries to move to Recovery."
@@ -256,30 +324,31 @@ function selectView(view, keyboardFocus = false) {
   if (keyboardFocus) $("title").focus();
   if (
     (view === "installed" && !state.loaded) ||
-    (cleanupView() && !state.snapshots.has(view)) ||
+    (cleanupView() && !state.snapshots[view]) ||
     (view === "recovery" && state.recovery === null)
   )
     refreshView(false);
 }
 
 function renderView() {
-  const snapshot = state.snapshots.get(state.view);
-  warnings(snapshot?.warnings ?? []);
+  const view = state.view;
+  warnings(state.snapshots[view]?.warnings ?? []);
   if (state.view === "installed") {
     renderApps();
     renderDetails();
-  } else if (cleanupView()) {
+  } else if (view === "leftovers" || view === "launchers") {
+    const snapshot = state.snapshots[view];
     renderCleanup(snapshot?.items ?? [], Boolean(snapshot));
   } else if (state.view === "recovery") {
     renderRecovery();
   }
 }
 
-async function fetchView(view, refresh) {
+async function fetchView(view: View, refresh: boolean) {
   if (view === "installed") {
     const scanned = await invoke("installed", { refresh });
-    if (refresh) state.snapshots.clear();
-    state.snapshots.set(view, scanned);
+    if (refresh) state.snapshots = {};
+    state.snapshots[view] = scanned;
     state.apps = scanned.items;
     state.loaded = true;
     if (!state.apps.some((app) => app.key === state.key)) closeDetails(false);
@@ -289,18 +358,18 @@ async function fetchView(view, refresh) {
       refresh,
     });
     if (refresh) {
-      state.snapshots.clear();
+      state.snapshots = {};
       state.loaded = false;
     }
     state.selection.clear();
-    state.snapshots.set(view, scanned);
+    state.snapshots[view] = scanned;
   } else if (view === "recovery") {
     state.recovery = await invoke("recovery");
   }
   renderView();
 }
 
-function refreshView(refresh) {
+function refreshView(refresh: boolean) {
   const view = state.view;
   const scanning = view !== "recovery";
   const label =
@@ -312,14 +381,18 @@ function refreshView(refresh) {
   return work(label, () => fetchView(view, refresh), scanning);
 }
 
-function positionPopover(menu, x, y) {
+function positionPopover(menu: HTMLElement, x: number, y: number) {
   const { width, height } = menu.getBoundingClientRect();
   menu.style.left = Math.max(8, Math.min(x, innerWidth - width - 8)) + "px";
   menu.style.top = Math.max(8, Math.min(y, innerHeight - height - 8)) + "px";
 }
 
-let rowTarget = null;
-function showRowMenu(event, app, button) {
+let rowTarget: { app: Application; button: HTMLButtonElement } | null = null;
+function showRowMenu(
+  event: MouseEvent | KeyboardEvent,
+  app: Application,
+  button: HTMLButtonElement,
+) {
   event.preventDefault();
   if (state.busy) return;
   rowTarget = { app, button };
@@ -330,13 +403,13 @@ function showRowMenu(event, app, button) {
   if (!menu.matches(":popover-open")) menu.showPopover();
   positionPopover(
     menu,
-    event.clientX || bounds.left + 12,
-    event.clientY || bounds.bottom,
+    ("clientX" in event && event.clientX) || bounds.left + 12,
+    ("clientY" in event && event.clientY) || bounds.bottom,
   );
   $("row-details").focus({ preventScroll: true });
 }
 
-function reviewUninstall(app) {
+function reviewUninstall(app: Application) {
   return review(
     "Preparing uninstall preview…",
     "Uninstall " + app.name + "?",
@@ -346,7 +419,7 @@ function reviewUninstall(app) {
   );
 }
 
-function reviewLauncherRemoval(app) {
+function reviewLauncherRemoval(app: Application) {
   return review(
     "Checking launcher…",
     "Remove the launcher for " + app.name + "?",
@@ -414,7 +487,7 @@ function renderApps() {
   $("show-more").hidden = visible.length >= filtered.length;
 }
 
-function openDetails(key) {
+function openDetails(key: string) {
   state.key = key;
   workspace.dataset.detail = "true";
   $("app-list")
@@ -426,7 +499,7 @@ function openDetails(key) {
   if (matchMedia("(max-width: 670px)").matches) $("back").focus();
 }
 
-function closeDetails(restoreFocus) {
+function closeDetails(restoreFocus: boolean) {
   const key = state.key;
   state.key = "";
   workspace.dataset.detail = "false";
@@ -497,7 +570,7 @@ function renderDetails() {
   }
 }
 
-function bytes(value) {
+function bytes(value: number | null) {
   if (value === null) return "Size unavailable";
   const units = ["B", "KiB", "MiB", "GiB", "TiB"];
   let unit = 0;
@@ -514,7 +587,7 @@ function bytes(value) {
   );
 }
 
-function renderCleanup(items, loaded) {
+function renderCleanup(items: Candidate[], loaded: boolean) {
   $("cleanup-count").textContent = loaded
     ? items.length + (items.length === 1 ? " candidate" : " candidates")
     : "";
@@ -610,7 +683,18 @@ function renderRecovery() {
   );
 }
 
-async function review(label, title, action, request, canRun = true) {
+async function review(
+  label: string,
+  title: string,
+  action:
+    | "Delete permanently"
+    | "Uninstall"
+    | "Remove launcher"
+    | "Install update"
+    | "Move to Recovery",
+  request: () => Promise<Confirmation>,
+  canRun = true,
+) {
   const result = await work(label, request);
   if (!result) return;
   const dialog = $("confirmation");
@@ -647,7 +731,7 @@ async function review(label, title, action, request, canRun = true) {
           state.restartRequired = true;
           $("update-status").textContent =
             "Update installed. Close and reopen Application Cleanup.";
-          notice($("update-status").textContent);
+          notice($("update-status").textContent ?? "");
           return;
         }
         let message = "No selected items were moved.";
@@ -668,15 +752,15 @@ async function review(label, title, action, request, canRun = true) {
   );
 }
 
-async function afterOperation(report, message) {
+async function afterOperation(report: ResultReport, message: string) {
   state.loaded = false;
-  state.snapshots.clear();
+  state.snapshots = {};
   state.recovery = null;
   state.selection.clear();
   const details = [...report.warnings];
   try {
     await fetchView(state.view, false);
-    details.push(...(state.snapshots.get(state.view)?.warnings ?? []));
+    details.push(...(state.snapshots[state.view]?.warnings ?? []));
   } catch (error) {
     details.push("Could not refresh the view. " + error);
   }
@@ -711,12 +795,18 @@ $("show-about").addEventListener("click", () => {
 });
 document.addEventListener("pointerdown", (event) => {
   const menu = $("row-menu");
-  if (menu.matches(":popover-open") && !menu.contains(event.target))
+  if (
+    menu.matches(":popover-open") &&
+    !(event.target instanceof Node && menu.contains(event.target))
+  )
     menu.hidePopover();
 });
 $("row-menu").addEventListener("focusout", (event) => {
   const menu = $("row-menu");
-  if (menu.matches(":popover-open") && !menu.contains(event.relatedTarget))
+  if (
+    menu.matches(":popover-open") &&
+    !(event.relatedTarget instanceof Node && menu.contains(event.relatedTarget))
+  )
     menu.hidePopover();
 });
 $("row-details").addEventListener("click", () => {
@@ -740,7 +830,7 @@ $("row-remove-launcher").addEventListener("click", () => {
 for (const [menuId, trigger] of [
   ["app-menu", () => $("app-menu-button")],
   ["row-menu", () => rowTarget?.button],
-]) {
+] as const) {
   $(menuId).addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     event.preventDefault();
@@ -750,7 +840,10 @@ for (const [menuId, trigger] of [
 }
 
 selectors.forEach((button) =>
-  button.addEventListener("click", () => selectView(button.dataset.view, true)),
+  button.addEventListener("click", () => {
+    const view = button.dataset.view;
+    if (view && Object.hasOwn(titles, view)) selectView(view as View, true);
+  }),
 );
 $("check-updates").addEventListener("click", () => checkUpdates());
 $("install-update").addEventListener("click", reviewUpdate);
@@ -793,6 +886,8 @@ $("cleanup-review").addEventListener("click", () =>
 $("theme").addEventListener("change", async () => {
   const old = state.theme;
   const selected = $("theme").value;
+  if (selected !== "system" && selected !== "light" && selected !== "dark")
+    return;
   state.theme = selected;
   applyAppearance();
   await work("Saving appearance…", async () => {
@@ -812,11 +907,11 @@ async function start() {
   let configurationWarning = "";
   applyAppearance();
   try {
-    await native.event.listen("system-theme", ({ payload }) => {
+    await listen("system-theme", ({ payload }) => {
       state.dark = payload;
       applyAppearance();
     });
-    await native.event.listen("operation-progress", ({ payload }) => {
+    await listen("operation-progress", ({ payload }) => {
       if (!state.busy) return;
       $("progress").hidden = false;
       $("progress").textContent = payload;

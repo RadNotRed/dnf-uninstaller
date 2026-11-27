@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Application Cleanup</title>
     <link rel="stylesheet" href="style.css" />
-    <script type="module" src="app.js"></script>
+    <script type="module" src="./app.ts"></script>
   </head>
   <body>
     <svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -86,7 +86,8 @@
             Update available
           </button>
           <button id="refresh" type="button">
-            <svg><use href="#refresh-icon" /></svg><span>Refresh</span>
+            <svg><use href="#refresh-icon" /></svg>
+            <span id="refresh-label">Refresh</span>
           </button>
         </div>
       </header>
@@ -131,7 +132,7 @@
             </select>
           </label>
         </div>
-        <div class="workspace">
+        <div id="app-workspace" class="workspace">
           <div class="app-results">
             <p class="count" id="app-count"></p>
             <ul

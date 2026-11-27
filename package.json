@@ -2,14 +2,18 @@
   "name": "linux-rust-uninstaller",
   "private": true,
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build",
-    "format": "prettier --write \"frontend/**/*.{html,css,js}\" \"src-tauri/tauri.conf.json\" \"package*.json\" \".github/**/*.yml\" README.md",
-    "format:check": "prettier --check \"frontend/**/*.{html,css,js}\" \"src-tauri/tauri.conf.json\" \"package*.json\" \".github/**/*.yml\" README.md",
-    "lint:js": "node --check frontend/app.js"
+    "dev": "bun --bun tauri dev",
+    "build": "bun --bun tauri build",
+    "frontend:dev": "bun ./frontend/index.html --host=127.0.0.1 --port=1420",
+    "frontend:build": "rm -rf ./dist/frontend && bun build ./frontend/index.html --target browser --outdir ./dist/frontend",
+    "format": "bun --bun prettier --write \"frontend/**/*.{html,css,ts}\" \"src-tauri/tauri.conf.json\" package.json tsconfig.json \".github/**/*.yml\" README.md",
+    "format:check": "bun --bun prettier --check \"frontend/**/*.{html,css,ts}\" \"src-tauri/tauri.conf.json\" package.json tsconfig.json \".github/**/*.yml\" README.md",
+    "typecheck": "bun --bun tsc --noEmit"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.6",
-    "prettier": "3.10.1"
-  }
+    "prettier": "3.10.1",
+    "typescript": "7.0.2"
+  },
+  "packageManager": "bun@1.4.5"
 }

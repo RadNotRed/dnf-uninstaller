@@ -18,12 +18,12 @@ Check for new versions under **Settings → Software updates**.
 
 ## Build
 
-Install Rust, Node.js, and npm, then run the following on Fedora.
+Install Rust and Bun, then run the following on Fedora.
 
 ```sh
 sudo dnf5 install gcc openssl-devel webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel rpm-build desktop-file-utils polkit
-npm ci
-npm run build
+bun ci
+bun run build
 ```
 
-The RPM is in `src-tauri/target/release/bundle/rpm/`. Run `npm run dev` for development.
+The RPM is in `src-tauri/target/release/bundle/rpm/`. Run `bun run dev` for development.

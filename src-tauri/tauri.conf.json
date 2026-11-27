@@ -3,7 +3,12 @@
   "productName": "Application Cleanup",
   "version": "0.1.6",
   "identifier": "dev.radnotred.application-cleanup",
-  "build": { "frontendDist": "../frontend" },
+  "build": {
+    "beforeDevCommand": "bun run frontend:dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "bun run frontend:build",
+    "frontendDist": "../dist/frontend"
+  },
   "app": {
     "withGlobalTauri": true,
     "windows": [

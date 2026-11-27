@@ -4,4 +4,4 @@
 /dist/
 /AGENTS.md
 /agents/
-/.npm-cache/
+/.bun-cache/
